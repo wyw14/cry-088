@@ -7,12 +7,19 @@ import (
 )
 
 func (w Worker) processDetached(ctx context.Context) error {
-	detached := context.WithoutCancel(ctx)
+	// Claiming (pulling) new messages must honor cancellation: once the
+	// worker's context is cancelled we stop fetching additional batches.
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	claimedAt := w.Now()
-	messages, err := w.Store.Claim(detached, w.BatchSize, claimedAt)
+	messages, err := w.Store.Claim(ctx, w.BatchSize, claimedAt)
 	if err != nil {
 		return err
 	}
+	// Detach only after claiming, so shutdown completes the in-flight batch
+	// without pulling new messages.
+	detached := context.WithoutCancel(ctx)
 	for index := range messages {
 		message := messages[index]
 		if err := w.handleDetached(detached, message); err != nil {
@@ -31,14 +38,18 @@ func (w Worker) handleDetached(ctx context.Context, message Message) error {
 	}
 	attempts := message.Attempts + 1
 	if attempts >= w.MaxAttempts {
-		return w.finishDetachedFailure(ctx, message, attempts)
+		return w.finishDetachedFailure(ctx, message, attempts, err)
 	}
 	return w.rescheduleDetachedFailure(ctx, message, attempts, err)
 }
 
-func (w Worker) finishDetachedFailure(ctx context.Context, message Message, attempts int) error {
+func (w Worker) finishDetachedFailure(ctx context.Context, message Message, attempts int, cause error) error {
 	message.Attempts = attempts
-	return w.Store.MarkDelivered(ctx, message.ID, w.Now())
+	causeText := ""
+	if cause != nil {
+		causeText = cause.Error()
+	}
+	return w.Store.MoveToDeadLetter(ctx, message, causeText, w.Now())
 }
 
 func (w Worker) rescheduleDetachedFailure(ctx context.Context, message Message, attempts int, cause error) error {
