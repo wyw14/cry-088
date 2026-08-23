@@ -1,0 +1,9 @@
+.env
+.env.*
+!.env.example
+var/
+web/node_modules/
+web/dist/
+.idea/
+.vscode/
+coverage.out
