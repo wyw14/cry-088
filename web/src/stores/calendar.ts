@@ -1,0 +1,1 @@
+import { defineStore } from 'pinia';import { api } from '../services/api';import type { CalendarMonth } from '../types/report';export const useCalendarStore=defineStore('calendar',{state:()=>({calendar:null as CalendarMonth|null}),actions:{async load(employeeId:string,month:string){this.calendar=await api<CalendarMonth>(`/calendar/${employeeId}?month=${month}`)}}})
