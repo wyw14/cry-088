@@ -1,0 +1,1 @@
+import { ref } from 'vue';export function useRequest<T>(action:()=>Promise<T>){const data=ref<T>();const error=ref<Error>();const loading=ref(false);async function run(){loading.value=true;error.value=undefined;try{data.value=await action()}catch(value){error.value=value as Error}finally{loading.value=false}}return{data,error,loading,run}}
