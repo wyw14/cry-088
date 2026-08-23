@@ -23,6 +23,10 @@ func (s Service) PersonalMonth(ctx context.Context, organizationID, employeeID s
 	if err != nil {
 		return Month{}, err
 	}
+	location, err := org.Location()
+	if err != nil {
+		return Month{}, err
+	}
 	entries, err := s.Entries.ListEmployeeMonth(ctx, employeeID, month)
 	if err != nil {
 		return Month{}, err
@@ -32,31 +36,35 @@ func (s Service) PersonalMonth(ctx context.Context, organizationID, employeeID s
 		if entry.State == timesheet.EntryReversed {
 			continue
 		}
-		key := entry.WorkDate.UTC().Format("2006-01-02")
+		local := entry.WorkDate.In(location)
+		key := local.Format("2006-01-02")
 		byDay[key] = append(byDay[key], entry)
 	}
-	start := time.Date(month.UTC().Year(), month.UTC().Month(), 1, 0, 0, 0, 0, time.UTC)
+	start := time.Date(month.In(location).Year(), month.In(location).Month(), 1, 0, 0, 0, 0, location)
 	end := start.AddDate(0, 1, 0)
 	result := Month{EmployeeID: employeeID, Timezone: org.Timezone}
-	for current := start; current.Before(end); current = current.AddDate(0, 0, 1) {
-		day := Day{
-			Date:            current,
-			ExpectedMinutes: org.OvertimeAfterMinute,
-			Entries:         append([]timesheet.Entry(nil), byDay[current.Format("2006-01-02")]...),
+	for day := start; day.Before(end); day = day.AddDate(0, 0, 1) {
+		working, err := s.Holidays.IsWorkingDay(ctx, organizationID, day.UTC())
+		if err != nil {
+			return Month{}, err
 		}
-		for _, entry := range day.Entries {
-			day.ReportedMinutes += entry.Minutes
-			if entry.Minutes > org.OvertimeAfterMinute {
-				day.OvertimeMinutes += entry.Minutes - org.OvertimeAfterMinute
-			}
+		value := Day{Date: day, Entries: append([]timesheet.Entry(nil), byDay[day.Format("2006-01-02")]...)}
+		if working {
+			value.ExpectedMinutes = org.OvertimeAfterMinute
 		}
-		day.Missing = day.ReportedMinutes == 0 && current.Before(time.Now().UTC())
-		result.TotalMinutes += day.ReportedMinutes
-		result.OvertimeMinutes += day.OvertimeMinutes
-		if day.Missing {
+		for _, entry := range value.Entries {
+			value.ReportedMinutes += entry.Minutes
+		}
+		if value.ReportedMinutes > org.OvertimeAfterMinute {
+			value.OvertimeMinutes = value.ReportedMinutes - org.OvertimeAfterMinute
+		}
+		value.Missing = working && value.ReportedMinutes == 0 && day.Before(time.Now().In(location))
+		result.TotalMinutes += value.ReportedMinutes
+		result.OvertimeMinutes += value.OvertimeMinutes
+		if value.Missing {
 			result.MissingDays++
 		}
-		result.Days = append(result.Days, day)
+		result.Days = append(result.Days, value)
 	}
 	return result, nil
 }
