@@ -67,7 +67,7 @@ type ReviewCommand struct {
 
 func (s Service) Review(ctx context.Context, command ReviewCommand) ([]timesheet.Entry, error) {
 	if len(command.Items) == 1 {
-		return s.reviewSingleWithoutActual(ctx, command)
+		return s.reviewSingle(ctx, command)
 	}
 	if !command.Actor.Has(organization.PermissionReviewTime) {
 		return nil, shared.New(shared.CodeForbidden, "review permission is required")

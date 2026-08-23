@@ -5,11 +5,15 @@ import (
 
 	"github.com/wyw14/cry-088/internal/domain/audit"
 	"github.com/wyw14/cry-088/internal/domain/organization"
+	"github.com/wyw14/cry-088/internal/domain/project"
 	"github.com/wyw14/cry-088/internal/domain/shared"
 	"github.com/wyw14/cry-088/internal/domain/timesheet"
 )
 
-func (s Service) reviewSingleWithoutActual(ctx context.Context, command ReviewCommand) ([]timesheet.Entry, error) {
+// reviewSingle reviews a single time entry. When the decision is to approve,
+// the project's actual minutes are accumulated so the project overview stays
+// in sync with the approved entries — identical to the batch review path.
+func (s Service) reviewSingle(ctx context.Context, command ReviewCommand) ([]timesheet.Entry, error) {
 	if command.OrganizationID == "" || command.Actor.EmployeeID == "" {
 		return nil, shared.New(shared.CodeInvalid, "review actor is incomplete")
 	}
@@ -41,8 +45,17 @@ func (s Service) reviewSingleWithoutActual(ctx context.Context, command ReviewCo
 		}
 		before := entry
 		now := s.Clock.Now()
+		var projectValue *project.Project
 		if item.Decision == DecisionApprove {
 			if err := entry.Approve(command.Actor.EmployeeID, item.Version, now); err != nil {
+				return err
+			}
+			loaded, err := s.Projects.GetForUpdate(txCtx, entry.ProjectID)
+			if err != nil {
+				return err
+			}
+			projectValue = &loaded
+			if err := projectValue.AddActual(entry.Minutes, projectValue.Version); err != nil {
 				return err
 			}
 		} else if err := entry.Return(command.Actor.EmployeeID, item.Reason, item.Version, now); err != nil {
@@ -50,6 +63,11 @@ func (s Service) reviewSingleWithoutActual(ctx context.Context, command ReviewCo
 		}
 		if err := s.Entries.Update(txCtx, entry, item.Version); err != nil {
 			return err
+		}
+		if projectValue != nil {
+			if err := s.Projects.Update(txCtx, *projectValue, projectValue.Version-1); err != nil {
+				return err
+			}
 		}
 		eventID, err := s.IDs.New("audit")
 		if err != nil {
