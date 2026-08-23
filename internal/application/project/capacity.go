@@ -75,8 +75,36 @@ func (s CapacityService) Assign(ctx context.Context, command AssignCommand) (dom
 	if err := assignment.Validate(); err != nil {
 		return domain.Assignment{}, err
 	}
+	if err := s.validateMonthlyCapacity(ctx, assignment, command.AvailableMinutes); err != nil {
+		return domain.Assignment{}, err
+	}
 	if err := s.Assignments.Insert(ctx, assignment); err != nil {
 		return domain.Assignment{}, err
 	}
 	return assignment, nil
+}
+
+// validateMonthlyCapacity guards against over-allocation across projects: for
+// every month the candidate assignment spans, it loads the employee's existing
+// assignments (from every project) and ensures that adding this assignment keeps
+// the combined monthly allocation within the employee's available capacity.
+// Without this check a lead could assign a member whose month is already filled
+// by other projects and the assignment would be reported as successful.
+func (s CapacityService) validateMonthlyCapacity(ctx context.Context, candidate domain.Assignment, available int) error {
+	cursor := time.Date(candidate.ValidFrom.UTC().Year(), candidate.ValidFrom.UTC().Month(), 1, 0, 0, 0, 0, time.UTC)
+	end := candidate.ValidUntil.UTC()
+	for !cursor.After(end) {
+		existing, err := s.Assignments.ListEmployeeMonth(ctx, candidate.EmployeeID, cursor)
+		if err != nil {
+			return err
+		}
+		pool := make([]domain.Assignment, 0, len(existing)+1)
+		pool = append(pool, candidate)
+		pool = append(pool, existing...)
+		if _, err := domain.BuildCapacityPlan(candidate.EmployeeID, cursor, available, pool); err != nil {
+			return err
+		}
+		cursor = cursor.AddDate(0, 1, 0)
+	}
+	return nil
 }
