@@ -59,11 +59,6 @@ func (s Service) closeConsistent(ctx context.Context, command CloseCommand) (dom
 	if !command.Actor.Has(organization.PermissionClosePeriod) || command.Actor.OrganizationID != command.OrganizationID {
 		return domain.CostSnapshot{}, shared.New(shared.CodeForbidden, "settlement close permission is required")
 	}
-	if existing, found, err := s.Snapshots.FindByPeriod(ctx, command.PeriodID); err != nil {
-		return domain.CostSnapshot{}, err
-	} else if found {
-		return existing, nil
-	}
 	var result domain.CostSnapshot
 	err := s.Transactions.WithinTransaction(ctx, func(txCtx context.Context) error {
 		period, err := s.Periods.GetForUpdate(txCtx, command.PeriodID)
@@ -73,23 +68,27 @@ func (s Service) closeConsistent(ctx context.Context, command CloseCommand) (dom
 		if period.OrganizationID != command.OrganizationID {
 			return shared.New(shared.CodeForbidden, "settlement period is outside organization")
 		}
-		if period.State == domain.PeriodClosed {
-			existing, found, err := s.Snapshots.FindByPeriod(txCtx, period.ID)
-			if err != nil {
-				return err
-			}
-			if !found {
-				return shared.New(shared.CodeConflict, "closed period has no immutable cost snapshot")
-			}
+		// Re-check the snapshot under the period row lock so that a concurrent
+		// close returns the existing snapshot instead of producing a duplicate.
+		if existing, found, err := s.Snapshots.FindByPeriod(txCtx, period.ID); err != nil {
+			return err
+		} else if found {
 			result = existing
 			return nil
 		}
-		if period.Version != command.ExpectedVersion {
+		if period.State == domain.PeriodClosed {
+			return shared.New(shared.CodeConflict, "closed period has no immutable cost snapshot")
+		}
+		if command.ExpectedVersion > 0 && period.Version != command.ExpectedVersion {
 			return shared.New(shared.CodeConflict, "settlement period was changed")
 		}
+		// heldVersion is the version currently held by the database row; the
+		// optimistic-concurrency predicate for Update must match it, not the
+		// in-memory value that BeginClose/CompleteClose mutate.
+		heldVersion := period.Version
 		before := period
 		if period.State == domain.PeriodOpen {
-			if err := period.BeginClose(command.Actor.EmployeeID, period.Version, s.Clock.Now()); err != nil {
+			if err := period.BeginClose(command.Actor.EmployeeID, heldVersion, s.Clock.Now()); err != nil {
 				return err
 			}
 		}
@@ -124,11 +123,12 @@ func (s Service) closeConsistent(ctx context.Context, command CloseCommand) (dom
 		if err := s.Snapshots.Insert(txCtx, snapshot); err != nil {
 			return err
 		}
-		periodVersion := period.Version
-		if err := period.CompleteClose(command.Actor.EmployeeID, periodVersion, s.Clock.Now()); err != nil {
+		// CompleteClose validates against the current in-memory version
+		// (already incremented by BeginClose when transitioning from open).
+		if err := period.CompleteClose(command.Actor.EmployeeID, period.Version, s.Clock.Now()); err != nil {
 			return err
 		}
-		if err := s.Periods.Update(txCtx, period, periodVersion); err != nil {
+		if err := s.Periods.Update(txCtx, period, heldVersion); err != nil {
 			return err
 		}
 		eventID, err := s.IDs.New("audit")
